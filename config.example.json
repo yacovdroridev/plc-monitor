@@ -4,6 +4,10 @@
     "rack": 0,
     "slot": 1
   },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 5000
+  },
   "igt_id": 1,
   "db": 1001,
   "candidate_dbs": [1001, 101],

@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Raspberry Pi-side PLC monitor using python-snap7 + SQLite."""
+"""Raspberry Pi-side PLC monitor with embedded web viewer.
+
+- Polls the PLC using python-snap7
+- Logs reads/writes to SQLite (plc_log.db)
+- Serves a minimal web dashboard on http://<host>:5000 by default
+
+Usage:
+    python monitor.py
+"""
 
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import snap7
-
+from flask import Flask, render_template_string, g
 
 DB_PATH = Path(__file__).with_name("plc_log.db")
 CONFIG_PATH = Path(__file__).with_name("config.json")
@@ -35,6 +43,8 @@ ERR_CODE = {
     8: "Err in IGT",
     9: "Missed report",
 }
+
+app = Flask(__name__)
 
 
 def load_config():
@@ -81,7 +91,7 @@ def init_db():
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.utcnow().isoformat() + "Z"
 
 
 def _decode_note(raw_hex: str, start: int):
@@ -117,9 +127,7 @@ def _decode_note(raw_hex: str, start: int):
 
 def read_db(client, cfg):
     items = []
-    igt_id = int(cfg["igt_id"])
     default_db = int(cfg["db"])
-
     for item in cfg.get("watch", []):
         start = int(item["start"])
         size = int(item["size"])
@@ -163,24 +171,173 @@ def read_db(client, cfg):
     return items
 
 
+# =============================================================================
+# Web viewer
+# =============================================================================
+
+INDEX_HTML = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PLC Monitor</title>
+<style>
+  :root{
+    --bg:#0b0f14;
+    --panel:#111820;
+    --line:#1f2937;
+    --text:#e5e7eb;
+    --muted:#9aa3b2;
+    --accent:#22c55e;
+    --danger:#ef4444;
+    --warn:#f59e0b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+  header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:16px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0f1620,#0b0f14);
+    position:sticky;top:0;z-index:5;
+  }
+  header h1{margin:0;font-size:16px;letter-spacing:.08em;text-transform:uppercase;color:var(--text)}
+  header .pill{font-size:11px;padding:4px 8px;border-radius:999px;background:#0b2a16;color:var(--accent);border:1px solid #174e2b}
+  .wrap{max-width:1200px;margin:0 auto;padding:16px}
+  .toolbar{display:flex;gap:8px;margin-bottom:12px}
+  button,form button{
+    background:#111820;color:var(--text);border:1px solid var(--line);padding:8px 12px;border-radius:8px;cursor:pointer;
+  }
+  button:hover,form button:hover{border-color:#2a3647}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  tr:hover td{background:#0c1320}
+  .event .ts{color:#b8c0cc}
+  .event .dir{color:#93c5fd}
+  .event .addr{color:#a5b4fc}
+  .event .note{color:#fcd34d}
+  .error .ts{color:#b8c0cc}
+  .error .msg{color:#fca5a5}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#0b2a16;color:var(--accent);border:1px solid #174e2b}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="toolbar">
+    <form method="post" action="/clear" style="display:inline">
+      <button type="submit">Clear log</button>
+    </form>
+  </div>
+  <h2 style="margin-top:0">Events</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Direction</th><th>DB</th><th>Start</th><th>Size</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for row in events %}
+    <tr class="event">
+      <td class="ts">{{ row['ts'] }}</td>
+      <td class="dir">{{ row['direction'] }}</td>
+      <td class="addr">{{ row['db'] }}:{{ row['start'] }}</td>
+      <td>{{ row['size'] }}</td>
+      <td class="note">{{ row['note'] or '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" style="color:var(--muted)">No events yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2 style="margin-top:16px">Errors</h2>
+  <table>
+    <thead><tr><th>Time</th><th>DB</th><th>Start</th><th>Size</th><th>Error</th></tr></thead>
+    <tbody>
+    {% for row in errors %}
+    <tr class="error">
+      <td class="ts">{{ row['ts'] }}</td>
+      <td class="addr">{{ row['db'] }}:{{ row['start'] }}</td>
+      <td>{{ row['size'] }}</td>
+      <td class="msg">{{ row['error'] }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" style="color:var(--muted)">No errors.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+</body>
+</html>
+"""
+
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+@app.route("/", methods=["GET"])
+def index():
+    db = get_db()
+    events = db.execute(
+        "SELECT ts, direction, db, start, size, note FROM events ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    errors = db.execute(
+        "SELECT ts, db, start, size, error FROM errors ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    return render_template_string(INDEX_HTML, events=events, errors=errors)
+
+
+@app.route("/clear", methods=["POST"])
+def clear():
+    db = get_db()
+    db.execute("DELETE FROM events")
+    db.execute("DELETE FROM errors")
+    db.commit()
+    return index()
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
 def main():
     cfg = load_config()
     init_db()
 
-    client = snap7.client.Client()
+    plc_client = snap7.client.Client()
     try:
-        client.connect(
-            cfg["plc"]["ip"], int(cfg["plc"]["rack"]), int(cfg["plc"]["slot"])
+        plc_client.connect(
+            cfg["plc"]["ip"],
+            int(cfg["plc"].get("rack", 0)),
+            int(cfg["plc"].get("slot", 1)),
         )
     except Exception as e:
         raise SystemExit(f"PLC connect failed: {e}")
 
+    host = cfg.get("web", {}).get("host", "0.0.0.0")
+    port = int(cfg.get("web", {}).get("port", 5000))
+
+    # Start Flask in a background thread.
+    import threading
+
+    threading.Thread(
+        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
+        daemon=True,
+    ).start()
+
     try:
         while True:
-            read_db(client, cfg)
+            read_db(plc_client, cfg)
             time.sleep(float(cfg.get("poll_interval_s", 2)))
     finally:
-        client.destroy()
+        plc_client.destroy()
 
 
 if __name__ == "__main__":

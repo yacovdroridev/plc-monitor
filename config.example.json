@@ -4,10 +4,11 @@
     "rack": 0,
     "slot": 1
   },
+  "igt_id": 1,
+  "db": 1001,
   "poll_interval_s": 2,
   "watch": [
-    {"db": 101, "start": 300, "size": 64},
-    {"db": 101, "start": 332, "size": 24}
+    {"db": 1001, "start": 300, "size": 64}
   ],
   "tcpdump": {
     "enabled": false,

@@ -6,7 +6,8 @@ Uses snap7/python-snap7 to talk S7 and logs traffic to a local SQLite DB.
 Quick start
 -----------
 1. Copy this folder to the Pi.
-2. Install deps:  pip install -r requirements.txt
+2. Install deps with uv:  ./setup.sh
+   (or manually: uv venv .venv && uv pip install -r requirements.txt --python .venv/bin/python)
    On Pi:  sudo apt-get install build-essential libsnap7-dev
 3. Copy config.example.json to config.json and edit PLC IP / DB list.
 4. Run:

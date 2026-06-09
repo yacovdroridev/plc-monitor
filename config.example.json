@@ -1,13 +1,13 @@
 {
   "plc": {
-    "ip": "192.168.1.10",
+    "ip": "192.168.46.2",
     "rack": 0,
     "slot": 1
   },
   "poll_interval_s": 2,
   "watch": [
-    {"db": 1, "start": 0, "size": 12},
-    {"db": 2, "start": 0, "size": 20}
+    {"db": 101, "start": 300, "size": 64},
+    {"db": 101, "start": 332, "size": 24}
   ],
   "tcpdump": {
     "enabled": false,

@@ -1,0 +1,17 @@
+{
+  "plc": {
+    "ip": "192.168.1.10",
+    "rack": 0,
+    "slot": 1
+  },
+  "poll_interval_s": 2,
+  "watch": [
+    {"db": 1, "start": 0, "size": 12},
+    {"db": 2, "start": 0, "size": 20}
+  ],
+  "tcpdump": {
+    "enabled": false,
+    "iface": "eth0",
+    "filter": "tcp port 102"
+  }
+}

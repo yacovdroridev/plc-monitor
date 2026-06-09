@@ -4,11 +4,10 @@
 import json
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import snap7
-from snap7.type import Areas
 
 
 DB_PATH = Path(__file__).with_name("plc_log.db")
@@ -40,15 +39,12 @@ ERR_CODE = {
 
 def load_config():
     data = json.loads(CONFIG_PATH.read_text())
-    for k in ("rack", "slot"):
-        data["plc"].setdefault(k, 0 if k == "rack" else 1)
+    data["plc"].setdefault("rack", 0)
+    data["plc"].setdefault("slot", 1)
     data.setdefault("igt_id", 1)
-    # candidate_dbs: ordered list of DB numbers to try for read success.
-    # If absent, defaults to [1000 + igt, 1000 + igt_id - 1].
-    igt_id = int(data["igt_id"])
+    data.setdefault("db", 1000 + int(data["igt_id"]))
     if "candidate_dbs" not in data:
-        default_dbs = [1000 + igt_id, 100 + igt_id]
-        data["candidate_dbs"] = [db for db in default_dbs if db > 0]
+        data["candidate_dbs"] = [int(data["db"])]
     return data
 
 
@@ -84,6 +80,10 @@ def init_db():
     return conn
 
 
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _decode_note(raw_hex: str, start: int):
     try:
         data = bytes.fromhex(raw_hex)
@@ -92,24 +92,40 @@ def _decode_note(raw_hex: str, start: int):
     if len(data) < 2:
         return None
     word = int.from_bytes(data[:2], byteorder="big")
+    if word == 0:
+        return None
     if start in (300, 302):
         return STATUS_TEST.get(word, f"StatusTest={word}")
-    if start in (304, 306, 308, 310, 332, 334, 336, 338, 340, 342, 344, 346, 348):
+    if start in (
+        304,
+        306,
+        308,
+        310,
+        332,
+        334,
+        336,
+        338,
+        340,
+        342,
+        344,
+        346,
+        348,
+    ):
         return ERR_CODE.get(word, f"ErrCode={word}")
     return None
 
 
 def read_db(client, cfg):
-    igt_id = int(cfg.get("igt_id", 1))
-    default_db = int(cfg.get("watch_default_db", 1000 + igt_id))
-    candidates = [int(x) for x in cfg.get("candidate_dbs", [default_db])]
     items = []
+    igt_id = int(cfg["igt_id"])
+    default_db = int(cfg["db"])
+
     for item in cfg.get("watch", []):
         start = int(item["start"])
         size = int(item["size"])
         pattern_db = int(item.get("db", default_db))
-        # Build queryset: try pattern_db first, then fallbacks.
-        dbs = [pattern_db] + [d for d in candidates if d != pattern_db]
+        dbs = [pattern_db] + [d for d in cfg["candidate_dbs"] if d != pattern_db]
+
         for db_number in dbs:
             try:
                 raw = client.db_read(db_number, start, size)
@@ -118,7 +134,7 @@ def read_db(client, cfg):
                 conn.execute(
                     "INSERT INTO events (ts, direction, db, start, size, raw_hex, note) VALUES (?,?,?,?,?,?,?)",
                     (
-                        datetime.utcnow().isoformat() + "Z",
+                        _now(),
                         "read",
                         db_number,
                         start,
@@ -128,14 +144,14 @@ def read_db(client, cfg):
                     ),
                 )
                 conn.commit()
-                items.append((db_number, start, size, note))
+                items.append({"db": db_number, "start": start, "size": size, "note": note})
                 break
             except Exception as e:
                 conn = sqlite3.connect(DB_PATH)
                 conn.execute(
                     "INSERT INTO errors (ts, db, start, size, error) VALUES (?,?,?,?,?)",
                     (
-                        datetime.utcnow().isoformat() + "Z",
+                        _now(),
                         db_number,
                         start,
                         size,
@@ -154,7 +170,7 @@ def main():
     client = snap7.client.Client()
     try:
         client.connect(
-            cfg["plc"]["ip"], int(cfg["plc"].get("rack", 0)), int(cfg["plc"].get("slot", 1))
+            cfg["plc"]["ip"], int(cfg["plc"]["rack"]), int(cfg["plc"]["slot"])
         )
     except Exception as e:
         raise SystemExit(f"PLC connect failed: {e}")

@@ -3,7 +3,7 @@
 
 - Polls the PLC using python-snap7
 - Logs reads/writes to SQLite (plc_log.db)
-- Serves a minimal web dashboard on http://<host>:5000 by default
+- Serves a dark register dashboard on http://<host>:5000 by default
 
 Usage:
     python monitor.py
@@ -12,11 +12,11 @@ Usage:
 import json
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import snap7
-from flask import Flask, render_template_string, g
+from flask import Flask, render_template_string, g, jsonify, request
 
 DB_PATH = Path(__file__).with_name("plc_log.db")
 CONFIG_PATH = Path(__file__).with_name("config.json")
@@ -91,7 +91,7 @@ def init_db():
 
 
 def _now():
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _decode_note(raw_hex: str, start: int):
@@ -152,7 +152,9 @@ def read_db(client, cfg):
                     ),
                 )
                 conn.commit()
-                items.append({"db": db_number, "start": start, "size": size, "note": note})
+                items.append(
+                    {"db": db_number, "start": start, "size": size, "note": note}
+                )
                 break
             except Exception as e:
                 conn = sqlite3.connect(DB_PATH)
@@ -192,33 +194,41 @@ INDEX_HTML = """
     --accent:#22c55e;
     --danger:#ef4444;
     --warn:#f59e0b;
+    --input-bg:#0a101a;
   }
   *{box-sizing:border-box}
   html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
   header{
-    display:flex;align-items:center;justify-content:space-between;
+    display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
     padding:16px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0f1620,#0b0f14);
     position:sticky;top:0;z-index:5;
   }
   header h1{margin:0;font-size:16px;letter-spacing:.08em;text-transform:uppercase;color:var(--text)}
-  header .pill{font-size:11px;padding:4px 8px;border-radius:999px;background:#0b2a16;color:var(--accent);border:1px solid #174e2b}
+  .status{display:flex;gap:10px;align-items:center}
+  .pill{font-size:11px;padding:4px 8px;border-radius:999px;background:#0b2a16;color:var(--accent);border:1px solid #174e2b}
+  .pill.dead{background:#2a0f0f;color:var(--danger);border-color:#4f1f1f}
   .wrap{max-width:1200px;margin:0 auto;padding:16px}
-  .toolbar{display:flex;gap:8px;margin-bottom:12px}
+  .toolbar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
   button,form button{
     background:#111820;color:var(--text);border:1px solid var(--line);padding:8px 12px;border-radius:8px;cursor:pointer;
   }
   button:hover,form button:hover{border-color:#2a3647}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-  th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
   tr:hover td{background:#0c1320}
-  .event .ts{color:#b8c0cc}
-  .event .dir{color:#93c5fd}
-  .event .addr{color:#a5b4fc}
-  .event .note{color:#fcd34d}
-  .error .ts{color:#b8c0cc}
-  .error .msg{color:#fca5a5}
-  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#0b2a16;color:var(--accent);border:1px solid #174e2b}
+  .addr{color:#a5b4fc}
+  .name{color:#e5e7eb}
+  .desc{color:#9aa3b2}
+  .value{font-weight:700}
+  input[type="number"]{
+    background:var(--input-bg);color:var(--text);border:1px solid var(--line);
+    padding:6px 8px;border-radius:6px;width:110px;font-family:inherit;
+  }
+  input[type="number"]:focus{outline:none;border-color:#334155}
+  .row-actions{display:flex;gap:6px}
+  .row-actions button{padding:4px 8px;font-size:11px}
+  .muted{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -227,42 +237,55 @@ INDEX_HTML = """
     <form method="post" action="/clear" style="display:inline">
       <button type="submit">Clear log</button>
     </form>
+    <button onclick="location.reload()">Refresh</button>
   </div>
-  <h2 style="margin-top:0">Events</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Direction</th><th>DB</th><th>Start</th><th>Size</th><th>Note</th></tr></thead>
-    <tbody>
-    {% for row in events %}
-    <tr class="event">
-      <td class="ts">{{ row['ts'] }}</td>
-      <td class="dir">{{ row['direction'] }}</td>
-      <td class="addr">{{ row['db'] }}:{{ row['start'] }}</td>
-      <td>{{ row['size'] }}</td>
-      <td class="note">{{ row['note'] or '' }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="6" style="color:var(--muted)">No events yet.</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
 
-  <h2 style="margin-top:16px">Errors</h2>
+  <h2 style="margin-top:0">PLC Registers (read from PLC)</h2>
+  <div class="status">
+    <div class="pill" id="alive-pill">ALIVE</div>
+    <div class="pill" id="db-pill">DB {{ db }}</div>
+  </div>
+  <p class="muted" style="margin-top:6px">PLC: {{ plc_ip }}</p>
+
+  <h2 style="margin-top:16px">Register Map</h2>
   <table>
-    <thead><tr><th>Time</th><th>DB</th><th>Start</th><th>Size</th><th>Error</th></tr></thead>
+    <thead>
+      <tr>
+        <th>Address</th>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Value</th>
+        <th>Set</th>
+      </tr>
+    </thead>
     <tbody>
-    {% for row in errors %}
-    <tr class="error">
-      <td class="ts">{{ row['ts'] }}</td>
-      <td class="addr">{{ row['db'] }}:{{ row['start'] }}</td>
-      <td>{{ row['size'] }}</td>
-      <td class="msg">{{ row['error'] }}</td>
+    {% for item in registers %}
+    <tr>
+      <td class="addr">DBW{{ item.start }}</td>
+      <td class="name">{{ item.name }}</td>
+      <td class="desc">{{ item.desc }}</td>
+      <td class="value" id="val-{{ item.start }}">{{ item.value if item.value is not none else '—' }}</td>
+      <td>
+        <form method="post" action="/write" style="display:inline">
+          <input type="hidden" name="start" value="{{ item.start }}" />
+          <input type="number" name="value" value="{{ item.value if item.value is not none else 0 }}" />
+          <button type="submit">Write</button>
+        </form>
+      </td>
     </tr>
-    {% else %}
-    <tr><td colspan="5" style="color:var(--muted)">No errors.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+
+<script>
+  fetch('/api/status').then(r=>r.json()).then(d=>{
+    const pill=document.getElementById('alive-pill');
+    if(d.recent_error){
+      pill.classList.add('dead'); pill.textContent='ERROR';
+    }
+  });
+</script>
 </body>
 </html>
 """
@@ -284,14 +307,92 @@ def close_db(exc):
 
 @app.route("/", methods=["GET"])
 def index():
+    cfg = load_config()
     db = get_db()
-    events = db.execute(
-        "SELECT ts, direction, db, start, size, note FROM events ORDER BY id DESC LIMIT 200"
+
+    default_db = int(cfg.get("db", 1001))
+    row = db.execute(
+        "SELECT db FROM events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    active_db = row["db"] if row else default_db
+
+    register_map = [
+        {"start": 200, "name": "RTC_sec", "desc": "PLC heartbeat / live connection", "scale": None},
+        {"start": 202, "name": "Port_Enable", "desc": "0=disable / 1=enable test start", "scale": None},
+        {"start": 204, "name": "Port_Status", "desc": "0=---- / 1=enable / 2=disable / 3=limit / 4=missing", "scale": None},
+        {"start": 208, "name": "GlvPressSP", "desc": "Glove pressure SP (Pa)", "scale": None},
+        {"start": 210, "name": "GlvPressThold", "desc": "Glove pressure threshold (Pa)", "scale": None},
+        {"start": 212, "name": "GlvPressDropSet", "desc": "Glove pressure drop setting (Pa)", "scale": None},
+        {"start": 214, "name": "GlvStabilSec", "desc": "Glove stabilization time (Sec)", "scale": None},
+        {"start": 216, "name": "GlvLeakSec", "desc": "Glove leak test time (Sec)", "scale": None},
+        {"start": 218, "name": "GlvBuildSec", "desc": "Glove max build time (Sec)", "scale": None},
+        {"start": 220, "name": "SealPressSP", "desc": "Seal pressure SP (Bar/10)", "scale": "÷10"},
+        {"start": 222, "name": "SealPressDropSet", "desc": "Seal pressure drop setting (Bar/10)", "scale": "÷10"},
+        {"start": 224, "name": "SealPressThold", "desc": "Seal pressure threshold (Bar/10)", "scale": "÷10"},
+        {"start": 226, "name": "SealLeakSec", "desc": "Seal leak test time (Sec)", "scale": None},
+        {"start": 228, "name": "SealBuildSec", "desc": "Seal max build time (Sec)", "scale": None},
+        {"start": 230, "name": "BatchID", "desc": "Run number / batch", "scale": None},
+        {"start": 232, "name": "TestMode", "desc": "0=PRF / 1=POST", "scale": None},
+    ]
+
+    latest = {}
+    rows = db.execute(
+        "SELECT db, start, raw_hex FROM events ORDER BY id DESC"
     ).fetchall()
-    errors = db.execute(
-        "SELECT ts, db, start, size, error FROM errors ORDER BY id DESC LIMIT 200"
-    ).fetchall()
-    return render_template_string(INDEX_HTML, events=events, errors=errors)
+    for r in rows:
+        key = (int(r["db"]), int(r["start"]))
+        if key not in latest:
+            latest[key] = r["raw_hex"]
+    for item in register_map:
+        key = (active_db, item["start"])
+        raw = latest.get(key)
+        if raw and len(bytes.fromhex(raw)) >= 2:
+            item["value"] = int.from_bytes(bytes.fromhex(raw)[:2], "big")
+        else:
+            item["value"] = None
+
+    return render_template_string(
+        INDEX_HTML, registers=register_map, db=active_db, plc_ip=cfg["plc"]["ip"]
+    )
+
+
+@app.route("/api/status")
+def api_status():
+    db = get_db()
+    row = db.execute(
+        "SELECT 1 FROM errors ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return jsonify({"recent_error": bool(row)})
+
+
+@app.route("/write", methods=["POST"])
+def write():
+    cfg = load_config()
+    igt_id = int(cfg.get("igt_id", 1))
+    db_number = int(cfg.get("db", 1000 + igt_id))
+    start = int(request.form.get("start", "0"))
+    value = int(request.form.get("value", "0"))
+
+    client = snap7.client.Client()
+    try:
+        client.connect(
+            cfg["plc"]["ip"],
+            int(cfg["plc"].get("rack", 0)),
+            int(cfg["plc"].get("slot", 1)),
+        )
+        payload = value.to_bytes(2, byteorder="big")
+        client.db_write(db_number, start, payload)
+        ok = True
+        err = None
+    except Exception as e:
+        ok = False
+        err = str(e)
+    finally:
+        client.destroy()
+
+    if not ok:
+        return jsonify({"ok": False, "error": err}), 500
+    return index()
 
 
 @app.route("/clear", methods=["POST"])
@@ -302,6 +403,10 @@ def clear():
     db.commit()
     return index()
 
+
+# =============================================================================
+# Main
+# =============================================================================
 
 def main():
     cfg = load_config()
@@ -320,7 +425,6 @@ def main():
     host = cfg.get("web", {}).get("host", "0.0.0.0")
     port = int(cfg.get("web", {}).get("port", 5000))
 
-    # Start Flask in a background thread.
     import threading
 
     threading.Thread(

@@ -13,7 +13,9 @@
   "candidate_dbs": [1001, 101],
   "poll_interval_s": 2,
   "watch": [
-    {"db": 1001, "start": 300, "size": 64}
+    {"db": 1001, "start": 200, "size": 12},
+    {"db": 1001, "start": 208, "size": 24},
+    {"db": 1001, "start": 230, "size": 6}
   ],
   "tcpdump": {
     "enabled": false,

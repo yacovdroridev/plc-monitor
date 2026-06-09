@@ -6,6 +6,7 @@
   },
   "igt_id": 1,
   "db": 1001,
+  "candidate_dbs": [1001, 101],
   "poll_interval_s": 2,
   "watch": [
     {"db": 1001, "start": 300, "size": 64}
@@ -16,3 +17,4 @@
     "filter": "tcp port 102"
   }
 }
+
